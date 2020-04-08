@@ -1,0 +1,241 @@
+#!/usr/bin/python3
+###############################################################################
+## Author: Jordan K Bartos
+## Date:   Februrary 6, 2020
+## Class:  CS 372-400 W2020
+## Program: chatserve
+## Description: This is the "server" end of the chat system. This program must
+##   be started on a certain port number for the chatclient to connect to. Once
+##   a connection is made, the two programs become peers and may exchange 
+##   messages between them.
+## Input:
+##   argv[1]: port number to begin the server on
+##
+## note: this program attempts to earn extra credit by allowing asynchronous
+##   sending/receiving of data over the TCP connection by use of SIGIO signals.
+##   This allows each user to send multiple messages at a time and to receive
+##   a message at any time.
+###############################################################################
+import threading 
+from socket import *
+import sys
+import os
+import random
+import signal
+import fcntl
+import time
+
+#source for threading: https://www.geeksforgeeks.org/multithreading-python-set-1/
+command = ""
+file_name = ""
+
+
+
+def parse_cl_args():
+  """
+  Description: this function parses the command line arguments passed
+    to ftclient. It throws an exception if server_port or client_port
+    are not integers
+  Input: none
+  Output: none
+  Preconditions: either 4 or 5 command line arguments must be passed
+    into ftclient. They must be:
+    - argv[1] - server name, the name of the host running ftserver
+    - argv[2] - the server port number at which ftserver is listening
+    - argv[3] - the port number for ftclient to listen for the response
+    - argv[4] - the command to be sent to ftserver. Either -l for list
+                                                           -g for get
+                                                           -c for cd
+    - argv[5] - the file name for ftserver to return if command is -g
+  Postconditions: variables command, file_name, server_port, cient_port, and
+    server_name are populated with the corresponding arguments
+  """
+  global file_name
+  global command
+  server_name = sys.argv[1]
+  server_port = int(sys.argv[2])
+  client_port = int(sys.argv[3])
+  command = sys.argv[4]
+  if len(sys.argv) > 5:
+    file_name = sys.argv[5]
+  else:
+    file_name = "" 
+  return server_name, server_port, client_port, command, file_name
+
+
+def build_message(command, file_name, listen_port):
+  """
+  Description: builds the string to send to ftserver formatted in a way that
+  ftserver can interpret.
+  Input:
+    - command - the command to send to ftserver
+    - file_name - the name of the file to request from ftserver
+    - listen_port - the port number than ftclient will listen on for
+        a response from ftserver
+  Output: a string, formatted for sending to ftserver
+  """
+  return command + "#" + file_name + "#" + str(listen_port) + "#"
+
+
+def start_connection_p(server_host, server_port, command, file_name):
+  """
+  Description: Opens a socket and connects to ftserver at server_host on
+    server_port. It then sends the request to ftserver and listens for a
+    response.
+  Input:
+    - server_host - the name of the host ftserver is running on
+    - server_port - the port number ftserver is listening on
+    - command - the command to send to ftserver. Should be -g, -l, or -c
+    - file_name - the name of the file to request if command is -g
+  Output:
+    - none
+  Preconditions:
+    - ftserver is listening for connections on server_host at server_port
+  Sources cited:
+    socket connection code source: https://docs.python.org/3/howto/sockets.html
+  """
+  try:
+    connection_p = socket(AF_INET, SOCK_STREAM)
+    connection_p.connect((server_host, server_port))
+  except:
+    print("An exception occured in establishing connection P")
+    exit(1)
+  request_message = build_message(command, file_name, client_port)
+  connection_p.send(request_message.encode(encoding='utf-8'))
+
+  message_in = None
+  while(message_in != ""):
+    message_in = connection_p.recv(1024).decode(encoding='utf-8')
+    print(message_in, end="")
+  connection_p.close()
+
+
+
+def open_connection_q(client_port):
+  """
+  Description: Opens a socket and binds it to listen for a connection from
+    ftserver
+  """
+  socket_Q = socket(AF_INET, SOCK_STREAM)
+  try:
+    socket_Q.bind(('', client_port))
+  except:
+    print("An error occured in binding socket for connection Q.")
+    exit(1)
+  return socket_Q
+
+
+def get_file(file_name):
+  file_prefix, file_extension = file_name.split(".")[0], file_name.split(".")[1:]
+  if file_extension:
+    file_extension = "." + ".".join(file_extension)
+  else:
+    file_extension = ""
+  suffix = 1
+  if os.path.exists(file_name):
+    print(file_name, "already exists.")
+
+    while os.path.exists(file_prefix + "_" + str(suffix) + file_extension):
+      suffix += 1
+    print("Writing to", file_prefix + "_" + str(suffix) + file_extension, "instead...")
+    file_name = file_prefix + "_" + str(suffix) + file_extension
+  return file_name
+  
+    
+
+
+def listen_q(socket_q):
+  """
+  Description: this function runs connection q while it is open. If the
+    command sent was -g, then it saves the data it receives into a new
+    file named file_name. If the command was -l, then it expects text that
+    should be displayed to the screen.
+  Input: socket_q, the socket object that receives the connection from 
+    ftserver
+  Output: none
+  """
+  # pull command and file_name from the global space
+  global command
+  global file_name
+
+  # listen for incoming connections
+  socket_q.listen(5)
+  connect_q, address = socket_q.accept()
+  # when a connection is received, either save the data received to a file
+  # or display to screen depending on the command
+  msg = None
+  if command == "-g":
+    # open a new file in binary mode
+    file_name = get_file(file_name)
+    if file_name:
+      new_file = open(file_name, "w+b")
+    else:
+      return
+    
+    total_bytes = 0
+    while True:
+    
+      # read bytes and save them to the file
+      msg = connect_q.recv(1024)
+      if not msg:
+        break;
+      received = bytearray(msg)
+      new_file.write(received)
+      total_bytes += len(received)
+    new_file.close()
+    if total_bytes == 0:
+      print("0 Bytes received:", file_name, "was not created.")
+      os.remove(file_name)
+    print("File transfer complete.")
+        
+  else:
+    # read characters and print them to screen
+    while not msg == "":
+      msg = connect_q.recv(1024).decode('utf-8')
+      print(msg, end="")
+  connect_q.shutdown(SHUT_RDWR)
+  connect_q.close()
+    
+  
+def start_connection_q(client_port):
+  """
+  Description: This function creates a socket for connection Q and then runs the
+    socket, accepting a connection and displaying/saving the data received on
+    that socket
+  Input: client_port - the port number on which to listen for connections
+  Output: none
+  """
+  socket_q = open_connection_q(client_port)
+  listen_q(socket_q)
+  socket_q.shutdown(SHUT_RDWR)
+  socket_q.close()
+  
+  
+if __name__ == "__main__":
+  """
+  Description: this is the main function of the chatserver. It opens a socket
+    for receiving connections on and listens on that socket. When a connection
+    is made, the program conducts a chat between the connected client and the
+    server, alternately receiving and sending messages. When either user sends
+    '\quit', the connection is broken and chatserver resumes listening for new
+    connections.
+  Input:
+    argv[1] - the port number upon which chatserver will listen for connections
+  Output:
+    none
+  """
+  server_host, server_port, client_port, command, file_name = parse_cl_args()
+  if (command == "-g" or command == "-c") and not file_name:
+    print("The", command, "command requires a file or folder name be supplied")
+  else:
+    threads = []
+    p_thread = threading.Thread(target=start_connection_p, args=(server_host, server_port, command, file_name,))
+    q_thread = threading.Thread(target=start_connection_q, args=(client_port,))
+    threads.append(p_thread)
+    threads.append(q_thread)
+    q_thread.start()
+    p_thread.start()
+    p_thread.join()
+    q_thread.join()
+  print("")
+
